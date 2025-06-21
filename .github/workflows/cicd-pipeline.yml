@@ -1,23 +1,23 @@
-# .github/workflows/cicd-pipeline.yml
 name: Full CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main" ] # Trigger on push to main
-  workflow_dispatch: # Allow manual triggers
+    branches: [ "main" ]
+  workflow_dispatch:
 
 env:
-  # Define a variable for the image name to avoid repetition
   IMAGE_NAME: ghcr.io/${{ github.repository }}
 
 jobs:
-  # JOB 1: Build the Docker image and push it to a registry
   build:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    permissions: # Grant special permissions to the GITHUB_TOKEN for this job
+    permissions:
       contents: read
       packages: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,22 +34,24 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Pass the commit SHA as a build argument to the Dockerfile
           build-args: |
             APP_VERSION=${{ github.sha }}
 
-  # JOB 2: Deploy the image to our server
   deploy:
     name: Deploy to EC2
-    needs: build # This is critical: The 'deploy' job will ONLY run if 'build' succeeds.
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to EC2 instance via SSH
@@ -61,18 +63,19 @@ jobs:
           port: 22
           script: |
             # Login to GHCR on the EC2 instance
-            echo ${{ secrets.GITHUB_TOKEN }} | sudo docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+            echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
 
-            # Best practice: Pull the image using the unique commit SHA tag
-            # This ensures we deploy the exact image we just built, not a generic 'latest' tag
-            sudo docker pull ${{ env.IMAGE_NAME }}@${{ steps.meta.outputs.digest }}
+            # Pull the image using the tag from the build job
+            sudo docker pull ${{ needs.build.outputs.image-tag }}
 
-            # Stop and remove the old container to avoid port conflicts
+            # Stop and remove the old container
             sudo docker stop my-app-container || true
             sudo docker rm my-app-container || true
 
             # Run a new container from the new image
-            sudo docker run -d --name my-app-container --restart always -p 3000:3000 ${{ env.IMAGE_NAME }}@${{ steps.meta.outputs.digest }}
+            sudo docker run -d --name my-app-container --restart always -p 3000:3000 \
+              -e APP_VERSION=${{ github.sha }} \
+              ${{ needs.build.outputs.image-tag }}
 
-            # Clean up old, unused Docker images to save disk space
+            # Clean up old, unused Docker images
             sudo docker image prune -a -f
