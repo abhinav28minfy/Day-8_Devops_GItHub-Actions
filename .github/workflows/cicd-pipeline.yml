@@ -7,6 +7,7 @@ on:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
+  CONTAINER_NAME: my-app-container
 
 jobs:
   build:
@@ -16,10 +17,9 @@ jobs:
       contents: read
       packages: write
     outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
-      # Add a specific tag output for deployment
-      deploy-tag: ${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ github.sha }}
+      deploy-tag: ${{ steps.tag.outputs.DEPLOY_TAG }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,7 +29,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }} # or use secrets.GHCR_PAT if needed
 
       - name: Extract metadata for Docker
         id: meta
@@ -38,7 +38,7 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
-            type=sha,prefix={{branch}}-
+            type=sha,prefix=${{ github.ref_name }}-
 
       - name: Build and push Docker image
         id: build
@@ -51,10 +51,16 @@ jobs:
           build-args: |
             APP_VERSION=${{ github.sha }}
 
+      - name: Extract deployable tag
+        id: tag
+        run: |
+          echo "DEPLOY_TAG=$(echo '${{ steps.meta.outputs.tags }}' | tr ',' '\n' | grep '${{ github.ref_name }}-' | head -n1)" >> $GITHUB_OUTPUT
+
   deploy:
     name: Deploy to EC2
     needs: build
     runs-on: ubuntu-latest
+
     steps:
       - name: Deploy to EC2 instance via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -64,20 +70,21 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           port: 22
           script: |
-            # Login to GHCR on the EC2 instance
+            # Log in to GHCR on EC2
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
             
-            # Pull the image using a specific tag (not multiple tags)
+            # Pull the specific deploy image
             sudo docker pull ${{ needs.build.outputs.deploy-tag }}
-            
-            # Stop and remove the old container
-            sudo docker stop my-app-container || true
-            sudo docker rm my-app-container || true
-            
-            # Run a new container from the new image
-            sudo docker run -d --name my-app-container --restart always -p 3000:3000 \
+
+            # Stop and remove the existing container if it exists
+            sudo docker stop $CONTAINER_NAME || true
+            sudo docker rm $CONTAINER_NAME || true
+
+            # Start the container from the new image
+            sudo docker run -d --name $CONTAINER_NAME --restart always -p 3000:3000 \
               -e APP_VERSION=${{ github.sha }} \
               ${{ needs.build.outputs.deploy-tag }}
-            
-            # Clean up old, unused Docker images
+
+            # Clean up unused images
             sudo docker image prune -a -f
+
