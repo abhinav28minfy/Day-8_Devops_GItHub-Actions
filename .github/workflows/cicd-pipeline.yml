@@ -18,6 +18,8 @@ jobs:
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
+      # Add a specific tag output for deployment
+      deploy-tag: ${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ github.sha }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -64,18 +66,18 @@ jobs:
           script: |
             # Login to GHCR on the EC2 instance
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
-
-            # Pull the image using the tag from the build job
-            sudo docker pull ${{ needs.build.outputs.image-tag }}
-
+            
+            # Pull the image using a specific tag (not multiple tags)
+            sudo docker pull ${{ needs.build.outputs.deploy-tag }}
+            
             # Stop and remove the old container
             sudo docker stop my-app-container || true
             sudo docker rm my-app-container || true
-
+            
             # Run a new container from the new image
             sudo docker run -d --name my-app-container --restart always -p 3000:3000 \
               -e APP_VERSION=${{ github.sha }} \
-              ${{ needs.build.outputs.image-tag }}
-
+              ${{ needs.build.outputs.deploy-tag }}
+            
             # Clean up old, unused Docker images
             sudo docker image prune -a -f
