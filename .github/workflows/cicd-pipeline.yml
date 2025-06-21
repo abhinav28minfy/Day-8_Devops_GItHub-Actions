@@ -7,7 +7,6 @@ on:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
-  CONTAINER_NAME: my-app-container
 
 jobs:
   build:
@@ -17,9 +16,8 @@ jobs:
       contents: read
       packages: write
     outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
-      deploy-tag: ${{ steps.tag.outputs.DEPLOY_TAG }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,7 +27,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }} # or use secrets.GHCR_PAT if needed
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata for Docker
         id: meta
@@ -38,7 +36,7 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
-            type=sha,prefix=${{ github.ref_name }}-
+            type=sha,prefix={{branch}}-
 
       - name: Build and push Docker image
         id: build
@@ -51,16 +49,10 @@ jobs:
           build-args: |
             APP_VERSION=${{ github.sha }}
 
-      - name: Extract deployable tag
-        id: tag
-        run: |
-          echo "DEPLOY_TAG=$(echo '${{ steps.meta.outputs.tags }}' | tr ',' '\n' | grep '${{ github.ref_name }}-' | head -n1)" >> $GITHUB_OUTPUT
-
   deploy:
     name: Deploy to EC2
     needs: build
     runs-on: ubuntu-latest
-
     steps:
       - name: Deploy to EC2 instance via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -70,21 +62,21 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           port: 22
           script: |
-            # Log in to GHCR on EC2
+            # Login to GHCR on the EC2 instance
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
-            
-            # Pull the specific deploy image
-            sudo docker pull ${{ needs.build.outputs.deploy-tag }}
 
-            # Stop and remove the existing container if it exists
-            sudo docker stop $CONTAINER_NAME || true
-            sudo docker rm $CONTAINER_NAME || true
+            # Pull the image using the tag from the build job
+            sudo docker pull ${{ needs.build.outputs.image-tag }}
 
-            # Start the container from the new image
-            sudo docker run -d --name $CONTAINER_NAME --restart always -p 3000:3000 \
+            # Stop and remove the old container
+            sudo docker stop my-app-container || true
+            sudo docker rm my-app-container || true
+
+            # Run a new container from the new image
+            sudo docker run -d --name my-app-container --restart always -p 3000:3000 \
               -e APP_VERSION=${{ github.sha }} \
-              ${{ needs.build.outputs.deploy-tag }}
+              ${{ needs.build.outputs.image-tag }}
 
-            # Clean up unused images
+            # Clean up old, unused Docker images
             sudo docker image prune -a -f
 
